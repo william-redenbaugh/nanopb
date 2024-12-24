@@ -3,7 +3,7 @@ from os import path
 
 class NanoPbConan(ConanFile):
     name = "nanopb"
-    version = "0.4.3-dev"
+    version = "1.0.0-dev"
     license = "zlib"
     url = "https://jpa.kapsi.fi/nanopb/"
     description = "Protocol Buffers with small code size"
@@ -30,3 +30,4 @@ class NanoPbConan(ConanFile):
     def package_info(self):
         self.cpp_info.includedirs = ["include"]
         self.cpp_info.libdirs = ["lib"]
+        self.cpp_info.libs = ["protobuf-nanopb"]

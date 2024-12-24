@@ -8,13 +8,14 @@
 #include "pb_common.h"
 
 /* Use the GCC warn_unused_result attribute to check that all return values
- * are propagated correctly. On other compilers and gcc before 3.4.0 just
- * ignore the annotation.
+ * are propagated correctly. On other compilers, gcc before 3.4.0 and iar
+ * before 9.40.1 just ignore the annotation.
  */
-#if !defined(__GNUC__) || ( __GNUC__ < 3) || (__GNUC__ == 3 && __GNUC_MINOR__ < 4)
-    #define checkreturn
-#else
+#if (defined(__GNUC__) && ((__GNUC__ > 3) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4))) || \
+    (defined(__IAR_SYSTEMS_ICC__) && (__VER__ >= 9040001))
     #define checkreturn __attribute__((warn_unused_result))
+#else
+    #define checkreturn
 #endif
 
 /**************************************
@@ -26,7 +27,7 @@ static bool checkreturn pb_check_proto3_default_value(const pb_field_iter_t *fie
 static bool checkreturn encode_basic_field(pb_ostream_t *stream, const pb_field_iter_t *field);
 static bool checkreturn encode_callback_field(pb_ostream_t *stream, const pb_field_iter_t *field);
 static bool checkreturn encode_field(pb_ostream_t *stream, pb_field_iter_t *field);
-static bool checkreturn encode_extension_field(pb_ostream_t *stream, const pb_field_iter_t *field);
+static pb_noinline bool checkreturn encode_extension_field(pb_ostream_t *stream, const pb_field_iter_t *field);
 static bool checkreturn default_extension_encoder(pb_ostream_t *stream, const pb_extension_t *extension);
 static bool checkreturn pb_encode_varint_32(pb_ostream_t *stream, uint32_t low, uint32_t high);
 static bool checkreturn pb_enc_bool(pb_ostream_t *stream, const pb_field_iter_t *field);
@@ -51,12 +52,10 @@ static bool checkreturn pb_enc_fixed_length_bytes(pb_ostream_t *stream, const pb
 
 static bool checkreturn buf_write(pb_ostream_t *stream, const pb_byte_t *buf, size_t count)
 {
-    size_t i;
     pb_byte_t *dest = (pb_byte_t*)stream->state;
     stream->state = dest + count;
     
-    for (i = 0; i < count; i++)
-        dest[i] = buf[i];
+    memcpy(dest, buf, count * sizeof(pb_byte_t));
     
     return true;
 }
@@ -65,7 +64,11 @@ pb_ostream_t pb_ostream_from_buffer(pb_byte_t *buf, size_t bufsize)
 {
     pb_ostream_t stream;
 #ifdef PB_BUFFER_ONLY
-    stream.callback = (void*)1; /* Just a marker value */
+    /* In PB_BUFFER_ONLY configuration the callback pointer is just int*.
+     * NULL pointer marks a sizing field, so put a non-NULL value to mark a buffer stream.
+     */
+    static const int marker = 0;
+    stream.callback = &marker;
 #else
     stream.callback = &buf_write;
 #endif
@@ -264,6 +267,15 @@ static bool checkreturn pb_check_proto3_default_value(const pb_field_iter_t *fie
             /* Proto2 optional fields inside proto3 message, or proto3
              * submessage fields. */
             return safe_read_bool(field->pSize) == false;
+        }
+        else if (field->descriptor->default_value)
+        {
+            /* Proto3 messages do not have default values, but proto2 messages
+             * can contain optional fields without has_fields (generator option 'proto3').
+             * In this case they must always be encoded, to make sure that the
+             * non-zero default value is overwritten.
+             */
+            return false;
         }
 
         /* Rest is proto3 singular fields */
@@ -472,7 +484,7 @@ static bool checkreturn default_extension_encoder(pb_ostream_t *stream, const pb
 
 /* Walk through all the registered extensions and give them a chance
  * to encode themselves. */
-static bool checkreturn encode_extension_field(pb_ostream_t *stream, const pb_field_iter_t *field)
+static pb_noinline bool checkreturn encode_extension_field(pb_ostream_t *stream, const pb_field_iter_t *field)
 {
     const pb_extension_t *extension = *(const pb_extension_t* const *)field->pData;
 
@@ -613,8 +625,9 @@ bool checkreturn pb_encode_varint(pb_ostream_t *stream, pb_uint64_t value)
 bool checkreturn pb_encode_svarint(pb_ostream_t *stream, pb_int64_t value)
 {
     pb_uint64_t zigzagged;
+    pb_uint64_t mask = ((pb_uint64_t)-1) >> 1; /* Satisfy clang -fsanitize=integer */
     if (value < 0)
-        zigzagged = ~((pb_uint64_t)value << 1);
+        zigzagged = ~(((pb_uint64_t)value & mask) << 1);
     else
         zigzagged = (pb_uint64_t)value << 1;
     
@@ -623,6 +636,10 @@ bool checkreturn pb_encode_svarint(pb_ostream_t *stream, pb_int64_t value)
 
 bool checkreturn pb_encode_fixed32(pb_ostream_t *stream, const void *value)
 {
+#if defined(PB_LITTLE_ENDIAN_8BIT) && PB_LITTLE_ENDIAN_8BIT == 1
+    /* Fast path if we know that we're on little endian */
+    return pb_write(stream, (const pb_byte_t*)value, 4);
+#else
     uint32_t val = *(const uint32_t*)value;
     pb_byte_t bytes[4];
     bytes[0] = (pb_byte_t)(val & 0xFF);
@@ -630,11 +647,16 @@ bool checkreturn pb_encode_fixed32(pb_ostream_t *stream, const void *value)
     bytes[2] = (pb_byte_t)((val >> 16) & 0xFF);
     bytes[3] = (pb_byte_t)((val >> 24) & 0xFF);
     return pb_write(stream, bytes, 4);
+#endif
 }
 
 #ifndef PB_WITHOUT_64BIT
 bool checkreturn pb_encode_fixed64(pb_ostream_t *stream, const void *value)
 {
+#if defined(PB_LITTLE_ENDIAN_8BIT) && PB_LITTLE_ENDIAN_8BIT == 1
+    /* Fast path if we know that we're on little endian */
+    return pb_write(stream, (const pb_byte_t*)value, 8);
+#else
     uint64_t val = *(const uint64_t*)value;
     pb_byte_t bytes[8];
     bytes[0] = (pb_byte_t)(val & 0xFF);
@@ -646,6 +668,7 @@ bool checkreturn pb_encode_fixed64(pb_ostream_t *stream, const void *value)
     bytes[6] = (pb_byte_t)((val >> 48) & 0xFF);
     bytes[7] = (pb_byte_t)((val >> 56) & 0xFF);
     return pb_write(stream, bytes, 8);
+#endif
 }
 #endif
 
@@ -702,8 +725,10 @@ bool checkreturn pb_encode_submessage(pb_ostream_t *stream, const pb_msgdesc_t *
 {
     /* First calculate the message size using a non-writing substream. */
     pb_ostream_t substream = PB_OSTREAM_SIZING;
-    size_t size;
+#if !defined(PB_NO_ENCODE_SIZE_CHECK) || PB_NO_ENCODE_SIZE_CHECK == 0
     bool status;
+    size_t size;
+#endif
     
     if (!pb_encode(&substream, fields, src_struct))
     {
@@ -713,17 +738,19 @@ bool checkreturn pb_encode_submessage(pb_ostream_t *stream, const pb_msgdesc_t *
         return false;
     }
     
-    size = substream.bytes_written;
-    
-    if (!pb_encode_varint(stream, (pb_uint64_t)size))
+    if (!pb_encode_varint(stream, (pb_uint64_t)substream.bytes_written))
         return false;
     
     if (stream->callback == NULL)
-        return pb_write(stream, NULL, size); /* Just sizing */
+        return pb_write(stream, NULL, substream.bytes_written); /* Just sizing */
     
-    if (stream->bytes_written + size > stream->max_size)
+    if (stream->bytes_written + substream.bytes_written > stream->max_size)
         PB_RETURN_ERROR(stream, "stream full");
         
+#if defined(PB_NO_ENCODE_SIZE_CHECK) && PB_NO_ENCODE_SIZE_CHECK == 1
+    return pb_encode(stream, fields, src_struct);
+#else
+    size = substream.bytes_written;
     /* Use a substream to verify that a callback doesn't write more than
      * what it did the first time. */
     substream.callback = stream->callback;
@@ -744,8 +771,9 @@ bool checkreturn pb_encode_submessage(pb_ostream_t *stream, const pb_msgdesc_t *
     
     if (substream.bytes_written != size)
         PB_RETURN_ERROR(stream, "submsg size changed");
-    
+
     return status;
+#endif
 }
 
 /* Field encoders */

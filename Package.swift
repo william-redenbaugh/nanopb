@@ -1,17 +1,10 @@
-// swift-tools-version:5.0
+// swift-tools-version:5.3
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
 let package = Package(
   name: "nanopb",
-    platforms: [
-        .macOS(.v10_10),
-        .iOS(.v8),
-        .tvOS(.v9),
-        .watchOS(.v2)
-    ],
-
   products: [
     .library(
       name: "nanopb",
@@ -32,6 +25,7 @@ let package = Package(
         "pb_encode.h",
         "pb_encode.c"
       ],
+      resources: [.process("spm_resources/PrivacyInfo.xcprivacy")],
       publicHeadersPath: "spm_headers",
       cSettings: [
         .define("PB_FIELD_32BIT", to: "1"),
